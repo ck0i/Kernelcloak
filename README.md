@@ -134,7 +134,6 @@ When a feature is disabled, its macros compile to passthrough/no-ops with zero o
 
 ```
 kernelcloak/
-├── include/kernelcloak/
 │   ├── kernelcloak.h       # master header
 │   ├── config.h            # feature toggles
 │   ├── core/               # kernel-safe primitives
@@ -142,7 +141,6 @@ kernelcloak/
 │   ├── strings/            # string obfuscation
 │   ├── obfuscation/        # value/control flow
 │   └── security/           # anti-debug/vm/integrity
-└── test_driver/            # WDM test driver + RE challenge
 ```
 
 ## License
