@@ -51,6 +51,11 @@
 #endif
 
 // security features (depends on core + crypto)
+// import_hiding comes first - other security headers use it for dynamic resolution
+#if KC_ENABLE_IMPORT_HIDING
+#include "security/import_hiding.h"
+#endif
+
 #if KC_ENABLE_ANTI_DEBUG
 #include "security/anti_debug.h"
 #endif
@@ -65,8 +70,4 @@
 
 #if KC_ENABLE_PE_ERASE
 #include "security/pe_erase.h"
-#endif
-
-#if KC_ENABLE_IMPORT_HIDING
-#include "security/import_hiding.h"
 #endif

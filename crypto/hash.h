@@ -280,24 +280,39 @@ KC_FORCEINLINE uint32_t hash32_rt_wide_ci(const wchar_t* str) {
 } // namespace kernelcloak
 
 // compile-time hash macros - 64-bit
+// wrapped in integral_constant to FORCE compile-time evaluation as a template
+// non-type parameter. this guarantees the string literal never gets a runtime
+// address and prevents MSVC from emitting it into .rdata.
 #define KC_HASH(s) \
-    (::kernelcloak::crypto::detail::fnv1a_64((s), ::kernelcloak::crypto::detail::ct_strlen(s)))
+    (::kernelcloak::detail::integral_constant< \
+        ::kernelcloak::uint64_t, \
+        ::kernelcloak::crypto::detail::fnv1a_64((s), ::kernelcloak::crypto::detail::ct_strlen(s))>::value)
 
 #define KC_HASH_CI(s) \
-    (::kernelcloak::crypto::detail::fnv1a_64_ci((s), ::kernelcloak::crypto::detail::ct_strlen(s)))
+    (::kernelcloak::detail::integral_constant< \
+        ::kernelcloak::uint64_t, \
+        ::kernelcloak::crypto::detail::fnv1a_64_ci((s), ::kernelcloak::crypto::detail::ct_strlen(s))>::value)
 
 #define KC_HASH_WIDE(s) \
-    (::kernelcloak::crypto::detail::fnv1a_64_wide((s), ::kernelcloak::crypto::detail::ct_wcslen(s)))
+    (::kernelcloak::detail::integral_constant< \
+        ::kernelcloak::uint64_t, \
+        ::kernelcloak::crypto::detail::fnv1a_64_wide((s), ::kernelcloak::crypto::detail::ct_wcslen(s))>::value)
 
 #define KC_HASH_WIDE_CI(s) \
-    (::kernelcloak::crypto::detail::fnv1a_64_wide_ci((s), ::kernelcloak::crypto::detail::ct_wcslen(s)))
+    (::kernelcloak::detail::integral_constant< \
+        ::kernelcloak::uint64_t, \
+        ::kernelcloak::crypto::detail::fnv1a_64_wide_ci((s), ::kernelcloak::crypto::detail::ct_wcslen(s))>::value)
 
 // compile-time hash macros - 32-bit
 #define KC_HASH32(s) \
-    (::kernelcloak::crypto::detail::fnv1a_32((s), ::kernelcloak::crypto::detail::ct_strlen(s)))
+    (::kernelcloak::detail::integral_constant< \
+        ::kernelcloak::uint32_t, \
+        ::kernelcloak::crypto::detail::fnv1a_32((s), ::kernelcloak::crypto::detail::ct_strlen(s))>::value)
 
 #define KC_HASH32_CI(s) \
-    (::kernelcloak::crypto::detail::fnv1a_32_ci((s), ::kernelcloak::crypto::detail::ct_strlen(s)))
+    (::kernelcloak::detail::integral_constant< \
+        ::kernelcloak::uint32_t, \
+        ::kernelcloak::crypto::detail::fnv1a_32_ci((s), ::kernelcloak::crypto::detail::ct_strlen(s))>::value)
 
 // runtime hash macros - 64-bit
 #define KC_HASH_RT(s)    (::kernelcloak::crypto::detail::fnv1a_64_rt(s))

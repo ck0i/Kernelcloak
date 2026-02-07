@@ -12,9 +12,13 @@ namespace kernelcloak {
 namespace obfuscation {
 namespace detail {
 
-// compile-time FNV-1a for block label hashing (standalone to avoid hash.h dependency)
-constexpr uint32_t cfg_hash(const char* str) {
-    uint32_t h = 0x811c9dc5u;
+// keyed FNV-1a for block label hashing.
+// takes a per-function seed instead of the standard offset basis so that
+// label hashes can't be recovered by running standard FNV-1a against a
+// wordlist. an analyst would need to extract each function's unique seed
+// before they can even attempt to brute-force label names.
+constexpr uint32_t cfg_hash(const char* str, uint32_t seed) {
+    uint32_t h = seed;
     while (*str) {
         h ^= static_cast<uint32_t>(*str++);
         h *= 0x01000193u;
@@ -37,6 +41,8 @@ KC_NOINLINE inline void cfg_dead_code() {
 
 // state encryption key derived from __COUNTER__ at function definition site
 // each flattened function gets a unique XOR key for state transitions
+// AND a unique hash seed so case label values are unrecoverable without
+// knowing the per-function key
 
 #define KC_FLAT_FUNC(ret_type, name, ...) \
     ret_type name(__VA_ARGS__) { \
@@ -44,27 +50,27 @@ KC_NOINLINE inline void cfg_dead_code() {
             static_cast<::kernelcloak::uint32_t>( \
                 (__COUNTER__ + 1) * 0x45D9F3Bu ^ 0xCC9E2D51u); \
         volatile ::kernelcloak::uint32_t _kc_state = \
-            ::kernelcloak::obfuscation::detail::cfg_hash("__entry") ^ _kc_flat_key; \
+            ::kernelcloak::obfuscation::detail::cfg_hash("__entry", _kc_flat_key) ^ _kc_flat_key; \
         volatile bool _kc_running = true; \
         ret_type _kc_ret_val{}; \
         while (_kc_running) { \
             ::kernelcloak::uint32_t _kc_decoded = _kc_state ^ _kc_flat_key; \
             switch (_kc_decoded) { \
-            case ::kernelcloak::obfuscation::detail::cfg_hash("__entry"):
+            case ::kernelcloak::obfuscation::detail::cfg_hash("__entry", _kc_flat_key):
 
 #define KC_FLAT_BLOCK(label) \
                 break; \
-            case ::kernelcloak::obfuscation::detail::cfg_hash(#label):
+            case ::kernelcloak::obfuscation::detail::cfg_hash(#label, _kc_flat_key):
 
 #define KC_FLAT_GOTO(label) \
-                _kc_state = ::kernelcloak::obfuscation::detail::cfg_hash(#label) ^ _kc_flat_key; \
+                _kc_state = ::kernelcloak::obfuscation::detail::cfg_hash(#label, _kc_flat_key) ^ _kc_flat_key; \
                 break;
 
 #define KC_FLAT_IF(cond, true_label, false_label) \
                 if (cond) { \
-                    _kc_state = ::kernelcloak::obfuscation::detail::cfg_hash(#true_label) ^ _kc_flat_key; \
+                    _kc_state = ::kernelcloak::obfuscation::detail::cfg_hash(#true_label, _kc_flat_key) ^ _kc_flat_key; \
                 } else { \
-                    _kc_state = ::kernelcloak::obfuscation::detail::cfg_hash(#false_label) ^ _kc_flat_key; \
+                    _kc_state = ::kernelcloak::obfuscation::detail::cfg_hash(#false_label, _kc_flat_key) ^ _kc_flat_key; \
                 } \
                 break;
 
@@ -76,15 +82,15 @@ KC_NOINLINE inline void cfg_dead_code() {
 // dead blocks injected before the default case
 #define KC_FLAT_END() \
                 break; \
-            case ::kernelcloak::obfuscation::detail::cfg_hash("__dead_0"): \
+            case ::kernelcloak::obfuscation::detail::cfg_hash("__dead_0", _kc_flat_key): \
                 ::kernelcloak::obfuscation::detail::cfg_dead_code(); \
-                _kc_state = ::kernelcloak::obfuscation::detail::cfg_hash("__dead_1") ^ _kc_flat_key; \
+                _kc_state = ::kernelcloak::obfuscation::detail::cfg_hash("__dead_1", _kc_flat_key) ^ _kc_flat_key; \
                 break; \
-            case ::kernelcloak::obfuscation::detail::cfg_hash("__dead_1"): \
+            case ::kernelcloak::obfuscation::detail::cfg_hash("__dead_1", _kc_flat_key): \
                 { volatile ::kernelcloak::uint32_t _d = 0xFEEDu; (void)_d; } \
-                _kc_state = ::kernelcloak::obfuscation::detail::cfg_hash("__dead_2") ^ _kc_flat_key; \
+                _kc_state = ::kernelcloak::obfuscation::detail::cfg_hash("__dead_2", _kc_flat_key) ^ _kc_flat_key; \
                 break; \
-            case ::kernelcloak::obfuscation::detail::cfg_hash("__dead_2"): \
+            case ::kernelcloak::obfuscation::detail::cfg_hash("__dead_2", _kc_flat_key): \
                 __nop(); \
                 _kc_running = false; \
                 break; \
@@ -95,6 +101,33 @@ KC_NOINLINE inline void cfg_dead_code() {
         } \
         return _kc_ret_val; \
     }
+
+// split variant for complex functions that need variable declarations
+// between the function head and the dispatch loop.
+// usage:
+//   KC_FLAT_FUNC_HEAD(NTSTATUS, myFunc, int arg1, int arg2)
+//       int local1 = 0;
+//       int local2 = 0;
+//   KC_FLAT_ENTER()
+//       // __entry block body
+//   KC_FLAT_BLOCK(next) ...
+//   KC_FLAT_END()
+
+#define KC_FLAT_FUNC_HEAD(ret_type, name, ...) \
+    ret_type name(__VA_ARGS__) { \
+        constexpr ::kernelcloak::uint32_t _kc_flat_key = \
+            static_cast<::kernelcloak::uint32_t>( \
+                (__COUNTER__ + 1) * 0x45D9F3Bu ^ 0xCC9E2D51u); \
+        ret_type _kc_ret_val{};
+
+#define KC_FLAT_ENTER() \
+        volatile ::kernelcloak::uint32_t _kc_state = \
+            ::kernelcloak::obfuscation::detail::cfg_hash("__entry", _kc_flat_key) ^ _kc_flat_key; \
+        volatile bool _kc_running = true; \
+        while (_kc_running) { \
+            ::kernelcloak::uint32_t _kc_decoded = _kc_state ^ _kc_flat_key; \
+            switch (_kc_decoded) { \
+            case ::kernelcloak::obfuscation::detail::cfg_hash("__entry", _kc_flat_key):
 
 #else // KC_ENABLE_CFG_FLATTEN disabled
 
@@ -114,5 +147,11 @@ KC_NOINLINE inline void cfg_dead_code() {
 #define KC_FLAT_END() \
         return _kc_ret_val; \
     }
+
+#define KC_FLAT_FUNC_HEAD(ret_type, name, ...) \
+    ret_type name(__VA_ARGS__) { \
+        ret_type _kc_ret_val{};
+
+#define KC_FLAT_ENTER()
 
 #endif // KC_ENABLE_CFG_FLATTEN
