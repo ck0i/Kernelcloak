@@ -9,15 +9,6 @@
 #if !defined(_NTDDK_) && !defined(_WDMDDK_)
 extern "C" {
     unsigned char __stdcall MmIsAddressValid(void* VirtualAddress);
-
-#ifndef _KC_LIST_ENTRY_DEFINED
-#define _KC_LIST_ENTRY_DEFINED
-    struct _LIST_ENTRY {
-        _LIST_ENTRY* Flink;
-        _LIST_ENTRY* Blink;
-    };
-    using LIST_ENTRY = _LIST_ENTRY;
-#endif
 }
 #endif
 
@@ -93,7 +84,7 @@ struct integrity_section_header {
 #pragma pack(pop)
 
 // find driver base by scanning backwards from a function address to MZ
-KC_NOINLINE void* find_own_base_from_address(void* addr) {
+KC_NOINLINE inline void* find_own_base_from_address(void* addr) {
     __try {
         auto ptr = reinterpret_cast<uintptr_t>(addr);
         ptr &= ~static_cast<uintptr_t>(0xFFF);
@@ -120,7 +111,7 @@ KC_NOINLINE void* find_own_base_from_address(void* addr) {
 }
 
 // find .text section (or first executable section) in PE image
-KC_NOINLINE bool find_text_section(void* base, uintptr_t& text_va, uint32_t& text_size) {
+KC_NOINLINE inline bool find_text_section(void* base, uintptr_t& text_va, uint32_t& text_size) {
     __try {
         auto* dos = static_cast<integrity_dos_header*>(base);
         if (dos->e_magic != 0x5A4D)
@@ -163,14 +154,25 @@ KC_NOINLINE bool find_text_section(void* base, uintptr_t& text_va, uint32_t& tex
 }
 
 // FNV-1a hash over arbitrary memory region
-KC_NOINLINE uint64_t compute_region_hash(const void* ptr, uint32_t size) {
+KC_NOINLINE inline uint64_t compute_region_hash(const void* ptr, uint32_t size) {
     __try {
-        auto* data = static_cast<const uint8_t*>(ptr);
-        uint64_t hash = crypto::detail::fnv64_offset_basis;
+        if (!ptr || size == 0)
+            return 0;
 
-        for (uint32_t i = 0; i < size; ++i) {
-            if (!MmIsAddressValid(const_cast<uint8_t*>(&data[i])))
+        auto* data = static_cast<const uint8_t*>(ptr);
+
+        // validate per-page rather than per-byte. this avoids high overhead on larger
+        // regions while still keeping us from faulting at elevated irql.
+        uintptr_t start = reinterpret_cast<uintptr_t>(data);
+        uintptr_t end = start + static_cast<uintptr_t>(size - 1);
+        uintptr_t page = start & ~static_cast<uintptr_t>(0xFFFull);
+        for (; page <= end; page += 0x1000) {
+            if (!MmIsAddressValid(reinterpret_cast<void*>(page)))
                 return 0;
+        }
+
+        uint64_t hash = crypto::detail::fnv64_offset_basis;
+        for (uint32_t i = 0; i < size; ++i) {
             hash ^= static_cast<uint64_t>(data[i]);
             hash *= crypto::detail::fnv64_prime;
         }
@@ -192,7 +194,7 @@ inline void*& stored_driver_base() {
 }
 
 // detect common inline hook patterns on a function
-KC_NOINLINE bool detect_hook(void* func_addr) {
+KC_NOINLINE inline bool detect_hook(void* func_addr) {
     __try {
         if (!func_addr || !MmIsAddressValid(func_addr))
             return false;
@@ -220,7 +222,7 @@ KC_NOINLINE bool detect_hook(void* func_addr) {
 
 // .text section self-checksum verification
 // first call stores baseline hash, subsequent calls compare against it
-KC_NOINLINE bool verify_integrity() {
+KC_NOINLINE inline bool verify_integrity() {
     __try {
         if (!stored_driver_base()) {
             stored_driver_base() = find_own_base_from_address(
@@ -274,3 +276,4 @@ KC_NOINLINE bool verify_integrity() {
 #define KC_VERIFY_INTEGRITY()       (true)
 
 #endif // KC_ENABLE_INTEGRITY
+

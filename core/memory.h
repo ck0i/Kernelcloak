@@ -6,12 +6,12 @@
 #pragma warning(disable: 4471)  // forward decl of unscoped enum (POOL_TYPE)
 #pragma warning(disable: 4005)  // macro redefinition (ntddk vs wdm overlap)
 
-#if !defined(_NTDDK_) && !defined(_WDMDDK_)
 extern "C" {
     // pool allocation - actual ntoskrnl exports
+#if !defined(_NTDDK_) && !defined(_WDMDDK_)
     void* __stdcall ExAllocatePool2(
         unsigned __int64 Flags,
-        unsigned __int64 NumberOfBytes,
+        kernelcloak::size_t NumberOfBytes,
         unsigned long Tag
     );
 
@@ -19,16 +19,14 @@ extern "C" {
         void* P,
         unsigned long Tag
     );
-
-    // the kernel CRT exports memcpy/memset/memmove
-    // RtlCopyMemory/RtlZeroMemory are macros in wdm.h that expand to these
-    // RtlMoveMemory/RtlFillMemory are actual ntoskrnl exports
-    void* __cdecl memcpy(void* dst, const void* src, unsigned __int64 size);
-    void* __cdecl memset(void* dst, int val, unsigned __int64 size);
-    void __stdcall RtlMoveMemory(void* Destination, const void* Source, unsigned __int64 Length);
-    void __stdcall RtlFillMemory(void* Destination, unsigned __int64 Length, unsigned char Fill);
-}
 #endif
+
+    // kernel memcpy/memset/memmove - available as compiler intrinsics and/or kernel exports.
+    // note: Rtl*Memory helpers are macros in WDK headers; avoid declaring them here.
+    void* __cdecl memcpy(void* dst, const void* src, kernelcloak::size_t size);
+    void* __cdecl memset(void* dst, int val, kernelcloak::size_t size);
+    void* __cdecl memmove(void* dst, const void* src, kernelcloak::size_t size);
+}
 
 #ifndef POOL_FLAG_NON_PAGED
 #define POOL_FLAG_NON_PAGED 0x0000000000000040ULL
@@ -38,8 +36,8 @@ extern "C" {
 #define POOL_FLAG_PAGED 0x0000000000000100ULL
 #endif
 
-// placement new - kernel mode has no <new> header
-#ifndef _KC_PLACEMENT_NEW_DEFINED
+// placement new - kernel mode builds often don't include <new>. avoid redefining if <new> was included.
+#if !defined(_KC_PLACEMENT_NEW_DEFINED) && !defined(_NEW_) && !defined(_INC_NEW)
 #define _KC_PLACEMENT_NEW_DEFINED
 inline void* operator new(kernelcloak::size_t, void* p) noexcept { return p; }
 inline void* operator new[](kernelcloak::size_t, void* p) noexcept { return p; }
@@ -61,7 +59,7 @@ KC_FORCEINLINE void* kc_memset(void* dst, int val, size_t n) {
 }
 
 KC_FORCEINLINE void* kc_memmove(void* dst, const void* src, size_t n) {
-    RtlMoveMemory(dst, src, n);
+    memmove(dst, src, n);
     return dst;
 }
 
@@ -93,6 +91,13 @@ public:
     explicit KernelBuffer(size_t count, uint64_t flags = POOL_FLAG_NON_PAGED, uint32_t tag = KC_POOL_TAG) noexcept
         : m_tag(tag)
     {
+        if (count == 0)
+            return;
+
+        constexpr size_t kc_size_max = ~static_cast<size_t>(0);
+        if (count > (kc_size_max / sizeof(T)))
+            return;
+
         m_size = count * sizeof(T);
         m_ptr = static_cast<T*>(ExAllocatePool2(flags, m_size, m_tag));
         if (m_ptr) {

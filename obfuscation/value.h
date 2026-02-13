@@ -4,6 +4,10 @@
 
 #if KC_ENABLE_VALUE_OBFUSCATION
 
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
+
 namespace kernelcloak {
 namespace obfuscation {
 namespace detail {

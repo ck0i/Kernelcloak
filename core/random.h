@@ -7,22 +7,27 @@
 
 extern "C" {
     unsigned __int64 __rdtsc();
+
+    __int64 _InterlockedExchangeAdd64(__int64 volatile*, __int64);
+    __int64 _InterlockedCompareExchange64(__int64 volatile*, __int64, __int64);
+    __int64 _InterlockedExchange64(__int64 volatile*, __int64);
 }
 
 #pragma intrinsic(__rdtsc)
+#pragma intrinsic(_InterlockedExchangeAdd64)
+#pragma intrinsic(_InterlockedCompareExchange64)
+#pragma intrinsic(_InterlockedExchange64)
 
 #if !defined(_NTDDK_) && !defined(_WDMDDK_)
 // LARGE_INTEGER may already be defined by ntddk.h/wdm.h
-#ifndef _LARGE_INTEGER_DEFINED_KC
-#define _LARGE_INTEGER_DEFINED_KC
-#ifndef _WINNT_
+#ifndef _LARGE_INTEGER_DEFINED
+#define _LARGE_INTEGER_DEFINED
 extern "C" {
     typedef union _LARGE_INTEGER {
         struct { unsigned long LowPart; long HighPart; };
         __int64 QuadPart;
-    } LARGE_INTEGER;
+    } LARGE_INTEGER, *PLARGE_INTEGER;
 }
-#endif
 #endif
 
 extern "C" {
@@ -96,6 +101,13 @@ constexpr uint32_t ct_make_seed(uint32_t counter, uint32_t line) {
     return h ? h : 0xdeadbeef;
 }
 
+KC_FORCEINLINE uint64_t splitmix64(uint64_t x) noexcept {
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+
 } // namespace detail
 
 namespace core {
@@ -114,11 +126,11 @@ struct ct_random {
     }
 };
 
-// runtime PRNG state - xorshift128+ for quality
-// seeded from multiple hardware entropy sources
+// runtime PRNG state - lock-free splitmix64 backed by an interlocked counter.
+// seeded from multiple hardware entropy sources, and lazily self-seeds if
+// kc_random_init() wasn't called.
 struct RuntimePrng {
-    uint64_t s0;
-    uint64_t s1;
+    volatile __int64 state;
 
     KC_NOINLINE void seed() noexcept {
         // gather entropy from multiple uncorrelated sources
@@ -135,34 +147,29 @@ struct RuntimePrng {
         // stack/pool KASLR entropy - address of local variable
         uint64_t stack_entropy = reinterpret_cast<uint64_t>(&tsc);
 
-        // mix all sources
-        s0 = tsc ^ (perf.QuadPart << 17) ^ interrupt_time;
-        s1 = (pid << 32) | tid;
-        s1 ^= stack_entropy;
-        s1 ^= static_cast<uint64_t>(freq.QuadPart) << 23;
+        // mix all sources into a single 64-bit seed
+        uint64_t seed = tsc ^ (perf.QuadPart << 17) ^ interrupt_time;
+        seed ^= (pid << 32) | tid;
+        seed ^= stack_entropy;
+        seed ^= static_cast<uint64_t>(freq.QuadPart) << 23;
 
-        // ensure nonzero state
-        if (!s0 && !s1) {
-            s0 = 0x853c49e6748fea9bull;
-            s1 = 0xda3e39cb94b95bdbull;
+        if (!seed) {
+            seed = 0x853c49e6748fea9bull;
         }
 
-        // warm up - discard first few outputs
-        for (int i = 0; i < 16; ++i) {
-            next64();
-        }
+        _InterlockedExchange64(&state, static_cast<__int64>(seed));
     }
 
     KC_FORCEINLINE uint64_t next64() noexcept {
-        uint64_t x = s0;
-        uint64_t y = s1;
-        s0 = y;
-        x ^= x << 23;
-        x ^= x >> 17;
-        x ^= y;
-        x ^= y >> 26;
-        s1 = x;
-        return x + y;
+        // lazy seed - avoid deterministic all-zero startup
+        if (_InterlockedCompareExchange64(&state, 0, 0) == 0) {
+            seed();
+        }
+
+        constexpr uint64_t inc = 0x9E3779B97F4A7C15ull;
+        uint64_t x = static_cast<uint64_t>(_InterlockedExchangeAdd64(
+            &state, static_cast<__int64>(inc)));
+        return ::kernelcloak::detail::splitmix64(x);
     }
 
     KC_FORCEINLINE uint32_t next32() noexcept {
@@ -176,7 +183,8 @@ struct RuntimePrng {
 };
 
 // global runtime PRNG instance
-// callers must call kc_random_init() once before using KC_RANDOM_RT
+// callers can call kc_random_init() once early for stronger entropy, but
+// kc_random_rt() will lazily seed on first use if needed.
 inline RuntimePrng& kc_global_prng() noexcept {
     // non-paged static - safe at DISPATCH_LEVEL
     static RuntimePrng instance = {};

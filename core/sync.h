@@ -8,18 +8,14 @@
 
 #if !defined(_NTDDK_) && !defined(_WDMDDK_)
 extern "C" {
-    // KSPIN_LOCK is ULONG_PTR in WDK
-    using KSPIN_LOCK = unsigned __int64;
-    using PKSPIN_LOCK = KSPIN_LOCK*;
-    using KIRQL = unsigned char;
-    using PKIRQL = KIRQL*;
-
-    void __stdcall KeInitializeSpinLock(PKSPIN_LOCK SpinLock);
-    void __stdcall KeAcquireSpinLock(PKSPIN_LOCK SpinLock, PKIRQL OldIrql);
-    void __stdcall KeReleaseSpinLock(PKSPIN_LOCK SpinLock, KIRQL NewIrql);
-    void __stdcall KeAcquireSpinLockAtDpcLevel(PKSPIN_LOCK SpinLock);
-    void __stdcall KeReleaseSpinLockFromDpcLevel(PKSPIN_LOCK SpinLock);
-    KIRQL __stdcall KeGetCurrentIrql();
+    // avoid defining WDK typedef names (KSPIN_LOCK/KIRQL) so include order doesn't break builds.
+    // these signatures match the WDK on both x86/x64 (KSPIN_LOCK == ULONG_PTR, KIRQL == UCHAR).
+    void __stdcall KeInitializeSpinLock(kernelcloak::uintptr_t* SpinLock);
+    void __stdcall KeAcquireSpinLock(kernelcloak::uintptr_t* SpinLock, unsigned char* OldIrql);
+    void __stdcall KeReleaseSpinLock(kernelcloak::uintptr_t* SpinLock, unsigned char NewIrql);
+    void __stdcall KeAcquireSpinLockAtDpcLevel(kernelcloak::uintptr_t* SpinLock);
+    void __stdcall KeReleaseSpinLockFromDpcLevel(kernelcloak::uintptr_t* SpinLock);
+    unsigned char __stdcall KeGetCurrentIrql();
 }
 #endif
 
@@ -82,7 +78,7 @@ namespace core {
 
 // RAII spinlock wrapper with IRQL save/restore
 class KSpinLock {
-    KSPIN_LOCK m_lock = 0;
+    uintptr_t m_lock = 0;
 
 public:
     KSpinLock() noexcept {
@@ -95,11 +91,11 @@ public:
     KSpinLock(KSpinLock&&) = delete;
     KSpinLock& operator=(KSpinLock&&) = delete;
 
-    KC_FORCEINLINE void acquire(KIRQL* old_irql) noexcept {
+    KC_FORCEINLINE void acquire(unsigned char* old_irql) noexcept {
         KeAcquireSpinLock(&m_lock, old_irql);
     }
 
-    KC_FORCEINLINE void release(KIRQL old_irql) noexcept {
+    KC_FORCEINLINE void release(unsigned char old_irql) noexcept {
         KeReleaseSpinLock(&m_lock, old_irql);
     }
 
@@ -112,12 +108,12 @@ public:
         KeReleaseSpinLockFromDpcLevel(&m_lock);
     }
 
-    KC_FORCEINLINE KSPIN_LOCK* native() noexcept { return &m_lock; }
+    KC_FORCEINLINE uintptr_t* native() noexcept { return &m_lock; }
 
     // scoped guard - acquires on construction, releases on destruction
     class Guard {
         KSpinLock& m_parent;
-        KIRQL m_old_irql = PASSIVE_LEVEL;
+        unsigned char m_old_irql = PASSIVE_LEVEL;
         bool m_owned = false;
 
     public:
@@ -138,7 +134,7 @@ public:
         Guard(Guard&&) = delete;
         Guard& operator=(Guard&&) = delete;
 
-        KC_FORCEINLINE KIRQL saved_irql() const noexcept { return m_old_irql; }
+        KC_FORCEINLINE unsigned char saved_irql() const noexcept { return m_old_irql; }
     };
 
     // scoped guard for code already at DISPATCH_LEVEL

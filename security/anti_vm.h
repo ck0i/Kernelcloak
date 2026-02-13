@@ -9,20 +9,21 @@
 extern "C" {
     void __cpuid(int cpuInfo[4], int function_id);
     unsigned __int64 __readmsr(unsigned long register_id);
+    unsigned char __stdcall KeGetCurrentIrql();
 }
 
 #if !defined(_NTDDK_) && !defined(_WDMDDK_)
 extern "C" {
-#ifndef _KC_UNICODE_STRING_DEFINED
-#define _KC_UNICODE_STRING_DEFINED
+#ifndef _UNICODE_STRING_DEFINED
+#define _UNICODE_STRING_DEFINED
     struct _UNICODE_STRING {
         unsigned short Length;
         unsigned short MaximumLength;
         wchar_t* Buffer;
     };
     using UNICODE_STRING = _UNICODE_STRING;
-#endif
     using PUNICODE_STRING = UNICODE_STRING*;
+#endif
 
     // IRQL: PASSIVE_LEVEL
     long __stdcall ZwOpenKey(void** KeyHandle, unsigned long DesiredAccess, void* ObjectAttributes);
@@ -32,12 +33,17 @@ extern "C" {
                                    unsigned long* ResultLength);
     long __stdcall ZwClose(void* Handle);
     void __stdcall RtlInitUnicodeString(UNICODE_STRING* DestinationString, const wchar_t* SourceString);
-    unsigned char __stdcall MmIsAddressValid(void* VirtualAddress);
     void __stdcall KeBugCheck(unsigned long BugCheckCode);
 }
 #endif
 
 #pragma intrinsic(__cpuid)
+#pragma intrinsic(__readmsr)
+
+// irql constants (avoid relying on core/sync.h include order)
+#ifndef PASSIVE_LEVEL
+#define PASSIVE_LEVEL 0
+#endif
 
 #ifndef OBJ_CASE_INSENSITIVE
 #define OBJ_CASE_INSENSITIVE 0x00000040
@@ -91,7 +97,7 @@ namespace vm_vendors {
 }
 
 // CPUID leaf 1, ECX bit 31
-KC_NOINLINE bool check_hypervisor_bit() {
+KC_NOINLINE inline bool check_hypervisor_bit() {
     __try {
         int regs[4] = {};
         __cpuid(regs, 1);
@@ -102,7 +108,7 @@ KC_NOINLINE bool check_hypervisor_bit() {
 }
 
 // CPUID leaf 0x40000000 vendor string -> FNV-1a hash, or 0
-KC_NOINLINE uint64_t get_hypervisor_vendor() {
+KC_NOINLINE inline uint64_t get_hypervisor_vendor() {
     __try {
         if (!check_hypervisor_bit())
             return 0;
@@ -121,10 +127,10 @@ KC_NOINLINE uint64_t get_hypervisor_vendor() {
     }
 }
 
-// IA32_VMX_BASIC MSR read - faults if VMX not available
-KC_NOINLINE bool check_vmx_msr() {
+// hyper-v MSR read - faults if the hyper-v MSR interface isn't present
+KC_NOINLINE inline bool check_hyperv_msr() {
     __try {
-        (void)__readmsr(0x480);
+        (void)__readmsr(0x40000000);
         return true;
     } __except (1) {
         return false;
@@ -132,7 +138,7 @@ KC_NOINLINE bool check_vmx_msr() {
 }
 
 // IRQL: PASSIVE_LEVEL
-KC_NOINLINE bool registry_key_exists(const wchar_t* path) {
+KC_NOINLINE inline bool registry_key_exists(const wchar_t* path) {
     __try {
         UNICODE_STRING key_path;
         RtlInitUnicodeString(&key_path, path);
@@ -161,9 +167,12 @@ KC_NOINLINE bool registry_key_exists(const wchar_t* path) {
 }
 
 // IRQL: PASSIVE_LEVEL
-KC_NOINLINE bool registry_read_string(const wchar_t* key_path, const wchar_t* value_name,
+KC_NOINLINE inline bool registry_read_string(const wchar_t* key_path, const wchar_t* value_name,
                                        wchar_t* buffer, uint32_t buffer_chars) {
     __try {
+        if (!buffer || buffer_chars == 0)
+            return false;
+
         UNICODE_STRING ukey;
         RtlInitUnicodeString(&ukey, key_path);
 
@@ -200,6 +209,7 @@ KC_NOINLINE bool registry_read_string(const wchar_t* key_path, const wchar_t* va
         if (copy_bytes > (buffer_chars - 1) * sizeof(wchar_t))
             copy_bytes = (buffer_chars - 1) * sizeof(wchar_t);
 
+        copy_bytes &= ~static_cast<uint32_t>(sizeof(wchar_t) - 1);
         core::kc_memcpy(buffer, info->Data, copy_bytes);
         buffer[copy_bytes / sizeof(wchar_t)] = L'\0';
         return true;
@@ -209,7 +219,7 @@ KC_NOINLINE bool registry_read_string(const wchar_t* key_path, const wchar_t* va
 }
 
 // IRQL: PASSIVE_LEVEL
-KC_NOINLINE bool check_registry_artifacts() {
+KC_NOINLINE inline bool check_registry_artifacts() {
     __try {
         if (registry_key_exists(L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\vmtools"))
             return true;
@@ -226,7 +236,7 @@ KC_NOINLINE bool check_registry_artifacts() {
 }
 
 // IRQL: PASSIVE_LEVEL
-KC_NOINLINE bool check_smbios_manufacturer() {
+KC_NOINLINE inline bool check_smbios_manufacturer() {
     __try {
         wchar_t manufacturer[128] = {};
         if (!registry_read_string(
@@ -250,25 +260,33 @@ KC_NOINLINE bool check_smbios_manufacturer() {
     }
 }
 
-KC_NOINLINE bool check_vm() {
+KC_NOINLINE inline bool check_vm() {
     if (check_hypervisor_bit())
         return true;
-    if (check_vmx_msr())
+
+    // catches hyper-v even if CPUID hypervisor bit is masked
+    if (check_hyperv_msr())
         return true;
-    if (check_registry_artifacts())
-        return true;
-    if (check_smbios_manufacturer())
-        return true;
+
+    // registry and smbios checks require PASSIVE_LEVEL
+    if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+        if (check_registry_artifacts())
+            return true;
+        if (check_smbios_manufacturer())
+            return true;
+    }
     return false;
 }
 
-KC_NOINLINE void take_vm_response() {
-#if KC_ANTI_DEBUG_RESPONSE == 1
+KC_NOINLINE inline void take_vm_response() {
+#if KC_ANTI_VM_RESPONSE == 1
     KeBugCheck(0x000000E2);
-#elif KC_ANTI_DEBUG_RESPONSE == 2
+#elif KC_ANTI_VM_RESPONSE == 2
     volatile uint8_t* sp = reinterpret_cast<volatile uint8_t*>(&sp);
     for (int i = 0; i < 4096; ++i)
         sp[i] = 0;
+#else
+    // response disabled
 #endif
 }
 
@@ -301,3 +319,4 @@ KC_NOINLINE void take_vm_response() {
 #define KC_DETECT_VM_VENDOR()  (static_cast<::kernelcloak::uint64_t>(0))
 
 #endif // KC_ENABLE_ANTI_VM
+

@@ -6,41 +6,59 @@
 
 #if KC_ENABLE_IMPORT_HIDING
 
+#ifndef PASSIVE_LEVEL
+#define PASSIVE_LEVEL 0
+#endif
+
+struct _ERESOURCE;
+
 #if !defined(_NTDDK_) && !defined(_WDMDDK_)
 extern "C" {
-#ifndef _KC_UNICODE_STRING_DEFINED
-#define _KC_UNICODE_STRING_DEFINED
-    struct _UNICODE_STRING {
+#ifndef _UNICODE_STRING_DEFINED
+#define _UNICODE_STRING_DEFINED
+    typedef struct _UNICODE_STRING {
         unsigned short Length;
         unsigned short MaximumLength;
         wchar_t* Buffer;
-    };
-    using UNICODE_STRING = _UNICODE_STRING;
+    } UNICODE_STRING, *PUNICODE_STRING;
 #endif
 
     void* __stdcall MmGetSystemRoutineAddress(UNICODE_STRING* SystemRoutineName);
     unsigned char __stdcall MmIsAddressValid(void* VirtualAddress);
+#if KC_IMPORT_HIDING_LOCK_MODULE_LIST
+    unsigned char __stdcall KeGetCurrentIrql();
+
+    struct _ERESOURCE;
+    unsigned char __stdcall ExAcquireResourceSharedLite(struct _ERESOURCE* Resource, unsigned char Wait);
+    void __stdcall ExReleaseResourceLite(struct _ERESOURCE* Resource);
+    void __stdcall KeEnterCriticalRegion();
+    void __stdcall KeLeaveCriticalRegion();
+#endif
 
     // PsLoadedModuleList - undocumented export from ntoskrnl.exe
     // head of doubly-linked list of KLDR_DATA_TABLE_ENTRY structures
     // describing all loaded kernel modules
-#ifndef _KC_LIST_ENTRY_DEFINED
-#define _KC_LIST_ENTRY_DEFINED
-    struct _LIST_ENTRY {
+#ifndef _LIST_ENTRY_DEFINED
+#define _LIST_ENTRY_DEFINED
+    typedef struct _LIST_ENTRY {
         _LIST_ENTRY* Flink;
         _LIST_ENTRY* Blink;
-    };
-    using LIST_ENTRY = _LIST_ENTRY;
+    } LIST_ENTRY, *PLIST_ENTRY;
 #endif
-    using PLIST_ENTRY = LIST_ENTRY*;
 
     extern LIST_ENTRY PsLoadedModuleList;
+#if KC_IMPORT_HIDING_LOCK_MODULE_LIST
+    extern struct _ERESOURCE PsLoadedModuleResource;
+#endif
 }
 #else
 // when ntddk/wdm is included, PsLoadedModuleList still needs declaration
 // as it's not in the standard WDK headers
 extern "C" {
     extern LIST_ENTRY PsLoadedModuleList;
+#if KC_IMPORT_HIDING_LOCK_MODULE_LIST
+    extern struct _ERESOURCE PsLoadedModuleResource;
+#endif
 }
 #endif
 
@@ -156,6 +174,20 @@ struct imp_export_directory {
     uint32_t AddressOfNameOrdinals;
 };
 
+// UNICODE_STRING buffers are not guaranteed to be null-terminated. for module names we
+// treat them as ASCII (low byte) and hash with the same algo as KC_HASH_CI("ntoskrnl.exe").
+KC_FORCEINLINE uint64_t fnv1a_64_rt_unicode_ci_to_ascii(const wchar_t* str, size_t len_chars) {
+    uint64_t hash = crypto::detail::fnv64_offset_basis;
+    for (size_t i = 0; i < len_chars; ++i) {
+        char c = static_cast<char>(static_cast<uint16_t>(str[i]) & 0xFFu);
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c + ('a' - 'A'));
+        hash ^= static_cast<uint64_t>(static_cast<uint8_t>(c));
+        hash *= crypto::detail::fnv64_prime;
+    }
+    return hash;
+}
+
 KC_FORCEINLINE bool is_valid_pe(void* base) {
     if (!base || !MmIsAddressValid(base))
         return false;
@@ -164,8 +196,12 @@ KC_FORCEINLINE bool is_valid_pe(void* base) {
     if (dos->e_magic != 0x5A4D)
         return false;
 
+    int32_t lfanew = dos->e_lfanew;
+    if (lfanew <= 0 || lfanew >= 0x1000)
+        return false;
+
     auto* nt = reinterpret_cast<imp_nt_headers64*>(
-        reinterpret_cast<uint8_t*>(base) + dos->e_lfanew);
+        reinterpret_cast<uint8_t*>(base) + lfanew);
     if (!MmIsAddressValid(nt))
         return false;
 
@@ -173,11 +209,35 @@ KC_FORCEINLINE bool is_valid_pe(void* base) {
 }
 
 // walk PsLoadedModuleList for module base by case-insensitive wide-string hash
-KC_NOINLINE void* find_module_by_hash(uint64_t name_hash) {
+KC_NOINLINE inline void* find_module_by_hash(uint64_t name_hash) {
+#if KC_IMPORT_HIDING_LOCK_MODULE_LIST
+    bool in_critical = false;
+    bool resource_acquired = false;
+#endif
+    void* found = nullptr;
+
     __try {
+#if KC_IMPORT_HIDING_LOCK_MODULE_LIST
+        if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+            __try {
+                KeEnterCriticalRegion();
+                in_critical = true;
+
+                ExAcquireResourceSharedLite(&PsLoadedModuleResource, 1);
+                resource_acquired = true;
+            } __except (1) {
+                resource_acquired = false;
+                if (in_critical) {
+                    KeLeaveCriticalRegion();
+                    in_critical = false;
+                }
+            }
+        }
+#endif
+
         auto* head = &PsLoadedModuleList;
         if (!MmIsAddressValid(head) || !MmIsAddressValid(head->Flink))
-            return nullptr;
+            goto out;
 
         for (auto* entry = head->Flink; entry != head; entry = entry->Flink) {
             if (!MmIsAddressValid(entry))
@@ -189,21 +249,52 @@ KC_NOINLINE void* find_module_by_hash(uint64_t name_hash) {
             if (!MmIsAddressValid(mod->BaseDllName.Buffer))
                 continue;
 
-            uint64_t h = crypto::detail::fnv1a_64_rt_wide_ci(mod->BaseDllName.Buffer);
-            if (h == name_hash)
-                return mod->DllBase;
+            size_t wchar_len = static_cast<size_t>(mod->BaseDllName.Length) / sizeof(wchar_t);
+            if (!wchar_len)
+                continue;
+            if (wchar_len > 260)
+                continue;
+
+            uint64_t h = fnv1a_64_rt_unicode_ci_to_ascii(mod->BaseDllName.Buffer, wchar_len);
+            if (h == name_hash) {
+                found = mod->DllBase;
+                break;
+            }
         }
+
+    out:
+#if KC_IMPORT_HIDING_LOCK_MODULE_LIST
+        if (resource_acquired) {
+            ExReleaseResourceLite(&PsLoadedModuleResource);
+            resource_acquired = false;
+        }
+        if (in_critical) {
+            KeLeaveCriticalRegion();
+            in_critical = false;
+        }
+#endif
+
+        return found;
     } __except (1) {
+#if KC_IMPORT_HIDING_LOCK_MODULE_LIST
+        if (resource_acquired) {
+            ExReleaseResourceLite(&PsLoadedModuleResource);
+        }
+        if (in_critical) {
+            KeLeaveCriticalRegion();
+        }
+#endif
         return nullptr;
     }
-
-    return nullptr;
 }
 
 // resolve export from module base by case-insensitive function name hash
 // handles forwarded exports by recursing into the target module
-KC_NOINLINE void* find_export_by_hash(void* module_base, uint64_t func_hash) {
+KC_NOINLINE inline void* find_export_by_hash(void* module_base, uint64_t func_hash, uint32_t depth = 0) {
     __try {
+        if (depth > 8)
+            return nullptr;
+
         if (!is_valid_pe(module_base))
             return nullptr;
 
@@ -276,7 +367,7 @@ KC_NOINLINE void* find_export_by_hash(void* module_base, uint64_t func_hash) {
                 if (!fwd_base)
                     return nullptr;
 
-                return find_export_by_hash(fwd_base, fwd_func_hash);
+                return find_export_by_hash(fwd_base, fwd_func_hash, depth + 1);
             }
 
             return base + func_rva;
@@ -290,7 +381,7 @@ KC_NOINLINE void* find_export_by_hash(void* module_base, uint64_t func_hash) {
 
 // fallback: MmGetSystemRoutineAddress for documented APIs
 // IRQL: PASSIVE_LEVEL
-KC_NOINLINE void* resolve_via_mm(const wchar_t* func_name) {
+KC_NOINLINE inline void* resolve_via_mm(const wchar_t* func_name) {
     __try {
         UNICODE_STRING name;
         name.Buffer = const_cast<wchar_t*>(func_name);
@@ -350,3 +441,4 @@ KC_FORCEINLINE void* resolve_import(uint64_t mod_hash, uint64_t func_hash) {
 #define KC_GET_PROC(mod_base, func) (nullptr)
 
 #endif // KC_ENABLE_IMPORT_HIDING
+

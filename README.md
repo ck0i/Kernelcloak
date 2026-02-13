@@ -41,12 +41,12 @@ A spiritual successor to [Cloakwork](https://github.com/ck0i/Cloakwork), but whe
 - `KSpinLock` - RAII spinlock with IRQL save/restore guards
 - `KernelAtomic<T>` - lock-free atomics via Interlocked* intrinsics
 - `KArray<T, N>` - stack-allocated constexpr array
-- Compile-time and runtime PRNG (xorshift, KASLR entropy)
+- Compile-time and runtime PRNG (xorshift32 + lock-free splitmix64, seeded from kernel entropy)
 
 ## Quick Start
 
 ```cpp
-#include "kernelcloak/kernelcloak.h"
+#include "kernelcloak.h"
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) {
     // encrypted strings - plaintext never in binary
@@ -78,14 +78,14 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
 Single header include:
 
 ```cpp
-#include "kernelcloak/kernelcloak.h"
+#include "kernelcloak.h"
 ```
 
 Or include only what you need:
 
 ```cpp
-#include "kernelcloak/strings/encrypted_string.h"
-#include "kernelcloak/obfuscation/value.h"
+#include "strings/encrypted_string.h"
+#include "obfuscation/value.h"
 ```
 
 ## Configuration
@@ -98,7 +98,8 @@ Define before including to customize:
 #define KC_ENABLE_VALUE_OBFUSCATION 1
 #define KC_POOL_TAG 'myTg'                 // custom pool tag
 #define KC_ANTI_DEBUG_RESPONSE 0           // 0=ignore, 1=bugcheck, 2=corrupt
-#include "kernelcloak/kernelcloak.h"
+#define KC_ANTI_VM_RESPONSE 0              // independent anti-vm response (defaults to anti-debug response)
+#include "kernelcloak.h"
 ```
 
 When a feature is disabled, its macros compile to passthrough/no-ops with zero overhead.
@@ -113,10 +114,10 @@ When a feature is disabled, its macros compile to passthrough/no-ops with zero o
 
 1. **Header-only** - no .lib or .cpp files to compile
 2. **C++17** - no C++20 features (concepts, consteval, ranges)
-3. **IRQL-aware** - every function documents its maximum safe IRQL
+3. **IRQL-aware** - PASSIVE-only paths are documented/gated where relevant
 4. **Zero dependencies** - only WDK headers + compiler intrinsics
 5. **Unique per build** - compile-time PRNG seeded from `__TIME__`, `__COUNTER__`, `__LINE__`
-6. **No BSOD** - all features degrade gracefully on failure
+6. **No unintended BSOD** - failure paths return false/null; anti-debug/anti-vm responses are configurable
 7. **No CRT** - no static destructors, no atexit, no STL
 
 ## What Makes This Different From Cloakwork
@@ -133,7 +134,7 @@ When a feature is disabled, its macros compile to passthrough/no-ops with zero o
 ## Project Structure
 
 ```
-kernelcloak/
+Kernelcloak/
 │   ├── kernelcloak.h       # master header
 │   ├── config.h            # feature toggles
 │   ├── core/               # kernel-safe primitives

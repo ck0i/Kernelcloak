@@ -8,7 +8,10 @@
 // NTSTATUS typedef - only when kernel headers aren't already included
 #if !defined(_NTDDK_) && !defined(_WDMDDK_)
 extern "C" {
-    using NTSTATUS = long;
+#ifndef _NTSTATUS_DEFINED
+#define _NTSTATUS_DEFINED
+    typedef long NTSTATUS;
+#endif
 
     // ntstrsafe string functions
     NTSTATUS __stdcall RtlStringCbCopyA(char* pszDest, unsigned __int64 cbDest, const char* pszSrc);

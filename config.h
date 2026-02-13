@@ -54,12 +54,21 @@
 #endif
 
 // behavioral config
+#ifndef KC_IMPORT_HIDING_LOCK_MODULE_LIST
+#define KC_IMPORT_HIDING_LOCK_MODULE_LIST 1
+#endif
+
 #ifndef KC_POOL_TAG
 #define KC_POOL_TAG 'kcLK'
 #endif
 
 #ifndef KC_ANTI_DEBUG_RESPONSE
 #define KC_ANTI_DEBUG_RESPONSE 1  // 0=ignore, 1=KeBugCheck, 2=corrupt state
+#endif
+
+// anti-vm can (optionally) share the same response as anti-debug, but keep it configurable
+#ifndef KC_ANTI_VM_RESPONSE
+#define KC_ANTI_VM_RESPONSE KC_ANTI_DEBUG_RESPONSE
 #endif
 
 #ifndef KC_LAYERED_REKEY_INTERVAL

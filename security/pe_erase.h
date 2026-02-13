@@ -97,7 +97,7 @@ struct pe_section_header {
 #pragma pack(pop)
 
 // find own driver base by scanning backward from known function address
-KC_NOINLINE void* find_driver_base() {
+KC_NOINLINE inline void* find_driver_base() {
     __try {
         auto ptr = reinterpret_cast<uintptr_t>(&find_driver_base);
         ptr &= ~static_cast<uintptr_t>(0xFFF);
@@ -126,7 +126,7 @@ KC_NOINLINE void* find_driver_base() {
 // erase PE headers from driver image
 // IRQL: PASSIVE_LEVEL - modifying own image pages
 // after this call, WinDbg !dh and similar tools will fail to parse the driver
-KC_NOINLINE bool erase_pe_headers() {
+KC_NOINLINE inline bool erase_pe_headers() {
     __try {
         void* base = find_driver_base();
         if (!base)
@@ -148,6 +148,12 @@ KC_NOINLINE bool erase_pe_headers() {
 
         uint16_t num_sections = nt->FileHeader.NumberOfSections;
         uint16_t opt_hdr_size = nt->FileHeader.SizeOfOptionalHeader;
+
+        // sanity checks - avoid bad section math if headers are corrupted
+        if (num_sections == 0 || num_sections > 96)
+            return false;
+        if (opt_hdr_size < sizeof(pe_optional_header64) || opt_hdr_size > 0x1000)
+            return false;
 
         auto* first_section = reinterpret_cast<pe_section_header*>(
             reinterpret_cast<uint8_t*>(&nt->OptionalHeader) + opt_hdr_size);
@@ -194,3 +200,4 @@ KC_NOINLINE bool erase_pe_headers() {
 #define KC_ERASE_PE_HEADER() (false)
 
 #endif // KC_ENABLE_PE_ERASE
+
