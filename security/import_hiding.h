@@ -218,7 +218,7 @@ KC_NOINLINE inline void* find_module_by_hash(uint64_t name_hash) {
 
     __try {
 #if KC_IMPORT_HIDING_LOCK_MODULE_LIST
-        if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+        if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
             __try {
                 KeEnterCriticalRegion();
                 in_critical = true;
