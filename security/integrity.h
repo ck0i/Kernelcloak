@@ -140,7 +140,9 @@ KC_NOINLINE inline bool find_text_section(void* base, uintptr_t& text_va, uint32
         }
 
         // fallback: first section with IMAGE_SCN_MEM_EXECUTE
+#ifndef IMAGE_SCN_MEM_EXECUTE
         constexpr uint32_t IMAGE_SCN_MEM_EXECUTE = 0x20000000;
+#endif
         for (uint16_t i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
             if (section[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) {
                 text_va = reinterpret_cast<uintptr_t>(base) + section[i].VirtualAddress;
