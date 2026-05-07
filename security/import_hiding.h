@@ -47,18 +47,14 @@ extern "C" {
 #endif
 
     extern LIST_ENTRY PsLoadedModuleList;
-#if KC_IMPORT_HIDING_LOCK_MODULE_LIST
     extern struct _ERESOURCE PsLoadedModuleResource;
-#endif
 }
 #else
 // when ntddk/wdm is included, PsLoadedModuleList still needs declaration
 // as it's not in the standard WDK headers
 extern "C" {
     extern LIST_ENTRY PsLoadedModuleList;
-#if KC_IMPORT_HIDING_LOCK_MODULE_LIST
     extern struct _ERESOURCE PsLoadedModuleResource;
-#endif
 }
 #endif
 
@@ -210,82 +206,37 @@ KC_FORCEINLINE bool is_valid_pe(void* base) {
 
 // walk PsLoadedModuleList for module base by case-insensitive wide-string hash
 KC_NOINLINE inline void* find_module_by_hash(uint64_t name_hash) {
-#if KC_IMPORT_HIDING_LOCK_MODULE_LIST
-    bool in_critical = false;
-    bool resource_acquired = false;
-#endif
+    ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL); // No PASSIVE_LEVEL no party
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceSharedLite(&PsLoadedModuleResource, TRUE);
+
     void* found = nullptr;
 
-    __try {
-#if KC_IMPORT_HIDING_LOCK_MODULE_LIST
-        if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
-            __try {
-                KeEnterCriticalRegion();
-                in_critical = true;
+    auto* head = &PsLoadedModuleList;
 
-                ExAcquireResourceSharedLite(&PsLoadedModuleResource, 1);
-                resource_acquired = true;
-            } __except (1) {
-                resource_acquired = false;
-                if (in_critical) {
-                    KeLeaveCriticalRegion();
-                    in_critical = false;
-                }
-            }
+    for (auto* entry = head->Flink; entry != head; entry = entry->Flink) {
+        auto* mod = CONTAINING_RECORD(entry, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+
+        if (!mod->BaseDllName.Buffer || !mod->BaseDllName.Length)
+            continue;
+
+        size_t wchar_len = mod->BaseDllName.Length / sizeof(wchar_t);
+        if (!wchar_len || wchar_len > 260)
+            continue;
+
+        uint64_t h = fnv1a_64_rt_unicode_ci_to_ascii(mod->BaseDllName.Buffer, wchar_len);
+
+        if (h == name_hash) {
+            found = mod->DllBase;
+            break;
         }
-#endif
-
-        auto* head = &PsLoadedModuleList;
-        if (!MmIsAddressValid(head) || !MmIsAddressValid(head->Flink))
-            goto out;
-
-        for (auto* entry = head->Flink; entry != head; entry = entry->Flink) {
-            if (!MmIsAddressValid(entry))
-                break;
-
-            auto* mod = reinterpret_cast<PKLDR_DATA_TABLE_ENTRY>(entry);
-            if (!mod->BaseDllName.Buffer || !mod->BaseDllName.Length)
-                continue;
-            if (!MmIsAddressValid(mod->BaseDllName.Buffer))
-                continue;
-
-            size_t wchar_len = static_cast<size_t>(mod->BaseDllName.Length) / sizeof(wchar_t);
-            if (!wchar_len)
-                continue;
-            if (wchar_len > 260)
-                continue;
-
-            uint64_t h = fnv1a_64_rt_unicode_ci_to_ascii(mod->BaseDllName.Buffer, wchar_len);
-            if (h == name_hash) {
-                found = mod->DllBase;
-                break;
-            }
-        }
-
-    out:
-#if KC_IMPORT_HIDING_LOCK_MODULE_LIST
-        if (resource_acquired) {
-            ExReleaseResourceLite(&PsLoadedModuleResource);
-            resource_acquired = false;
-        }
-        if (in_critical) {
-            KeLeaveCriticalRegion();
-            in_critical = false;
-        }
-#endif
-
-        return found;
-    } __except (1) {
-#if KC_IMPORT_HIDING_LOCK_MODULE_LIST
-        if (resource_acquired) {
-            ExReleaseResourceLite(&PsLoadedModuleResource);
-        }
-        if (in_critical) {
-            KeLeaveCriticalRegion();
-        }
-#endif
-        return nullptr;
     }
+
+    ExReleaseResourceLite(&PsLoadedModuleResource);
+    KeLeaveCriticalRegion();
+
+    return found;
 }
 
 // resolve export from module base by case-insensitive function name hash

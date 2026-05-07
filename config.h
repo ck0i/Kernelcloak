@@ -53,11 +53,6 @@
 #define KC_ENABLE_BOOLEAN_OBFUSCATION KC_ENABLE_ALL
 #endif
 
-// behavioral config
-#ifndef KC_IMPORT_HIDING_LOCK_MODULE_LIST
-#define KC_IMPORT_HIDING_LOCK_MODULE_LIST 1
-#endif
-
 #ifndef KC_POOL_TAG
 #define KC_POOL_TAG 'kcLK'
 #endif
